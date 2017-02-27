@@ -1,0 +1,31 @@
+[package]
+name = "admin-gluster"
+version = "0.1.0"
+authors = ["Chris Holcombe <xfactor973@gmail.com>"]
+
+[dependencies]
+clap = "*"
+gluster = "*"
+influent = "0.4"
+libatasmart = "*"
+log = "*"
+simple_logger = "*"
+time = "*"
+
+[profile.release]
+opt-level = 3
+debug = false
+rpath = false
+lto = false
+debug-assertions = false
+codegen-units = 1
+
+# The development profile, used for `cargo build`
+[profile.dev]
+opt-level = 0  # Controls the --opt-level the compiler builds with
+debug = true   # Controls whether the compiler passes `-g`
+rpath = false  # Controls whether the compiler passes `-C rpath`
+lto = false    # Controls `-C lto` for binaries and staticlibs
+debug-assertions = true  # Controls whether debug assertions are enabled
+codegen-units = 1 # Controls whether the compiler passes `-C codegen-units`
+                  # `codegen-units` is ignored when `lto = true`
