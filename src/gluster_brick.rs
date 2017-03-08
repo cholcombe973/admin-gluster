@@ -1,4 +1,5 @@
 extern crate gluster;
+extern crate influent;
 extern crate time;
 use self::gluster::volume_list;
 
@@ -12,14 +13,23 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::Duration;
 
+use self::influent::client::{Client, Credentials};
+use self::influent::create_client;
 
-pub fn initialize_brick_scanner() {
+pub fn initialize_brick_scanner(args: &Args) {
     thread::spawn(move || {
         debug!("Monitoring Gluster Bricks");
         // Wait for 5 seconds and then proceed.
         let _ = timer(Duration::from_secs(5));
 
-        let vols = gluster::volume_list().unwrap();
+        let vols = match gluster::volume_list() {
+            Some(vols) => vols,
+            None => {
+                error!("Unable to list gluster volumes.  Failed with error");
+                return;
+            }
+        };
+
         // Grab the stats for each volume
         let stats_files = match fs::read_dir("/var/lib/glusterd/stats") {
             Ok(files) => files,
@@ -29,36 +39,54 @@ pub fn initialize_brick_scanner() {
             }
         };
 
-        for file in stats_files {
-            for vol in vols {
-                // Skipping invalid direntries
-                if let Ok(f) = file {
-                    if f.file_name().to_string_lossy() == format!("glusterfs_{}.dump", vol) {
-                        // Read this vol fops file
-                        // Split the aggr from the inter fops.  This file technically isn't valid
-                        // json because it concats 2 objects together
+        let hostname = {
+            let mut buffer: String = String::new();
+            let bytes_read = File::open("/etc/hostname")
+                .unwrap()
+                .read_to_string(&mut buffer)
+                .unwrap();
+            buffer
+        };
+        let do_influx = args.influx.is_some() && args.outputs.contains(&"influx".to_string());
+        let mut user = String::new();
+        let mut password = String::new();
+        let credentials: Credentials;
+        let host: String;
+        let mut hosts: Vec<&str> = vec![];
 
-                        if let Ok(f_type) = f.file_type() {
-                            // Check if this is a file just in case
-                            if f_type.is_file() {
-
-                                // influx::record_measurement(brick_fops: &HashMap<String, f64>,
-                                //                           client: &Client,
-                                //                           hostname: &str,
-                                //                           drive_name: &str,
-                                //                           osd_num: &str)
-                            } else {
-                                error!("The glusterfs_{}.dump file is not a file!", vol);
-                            }
-                        }
-                    } else {
-                        // Skipping entries that don't look like glusterfs_{vol_name}.dump
-                        trace!("Skipping fop stat file: {}",
-                               f.file_name().to_string_lossy());
-                    }
-                }
-            }
-        }
+        let influx = args.influx;
+        let client = if do_influx {
+            let influx = influx.unwrap();
+            user = influx.user.clone();
+            password = influx.password.clone();
+            credentials = Credentials {
+                username: &user[..],
+                password: &password[..],
+                database: "ceph",
+            };
+            host = format!("http://{}:{}", influx.host, influx.port);
+            hosts = vec![&host[..]];
+            create_client(credentials, hosts)
+        } else {
+            credentials = Credentials {
+                username: &user[..],
+                password: &password[..],
+                database: "",
+            };
+            create_client(credentials, hosts)
+        };
+        stats_files
+            //Only operate on valid directory entries
+            .filter(|entry| entry.is_ok())
+            .map(|entry| entry.unwrap())
+            // If the entry matches a volume name
+            .filter(|entry| vols.contains(&entry.file_name().to_string_lossy().into_owned()))
+            // Record the stats in influx
+            .map(|entry| {
+                let fops = split_and_parse_fops_json(&entry.path()).unwrap();
+                influx::record_measurement(&fops.0, influx_client, &hostname, "brick_name");
+                influx::record_measurement(&fops.1, influx_client, &hostname, "brick_name");
+            });
     });
 }
 
@@ -66,27 +94,28 @@ pub fn initialize_brick_scanner() {
 fn split_and_parse_fops_json
     (path: &Path)
      -> Result<(HashMap<String, f64>, HashMap<String, f64>), ::std::io::Error> {
+    let filename = path.file_name().unwrap().to_string_lossy();
     let mut buffer: String = String::new();
     let bytes_read = File::open(path)?
         .read_to_string(&mut buffer)?;
-    let parts = buffer.split("}\n{").collect();
-    gluster::fop::read_aggr_fop(json_data: &str, filename: &str)
+    let parts: Vec<&str> = buffer.split("}\n{").collect();
+    let aggr_fops = gluster::fop::read_aggr_fop(parts[0], &filename).unwrap();
+    let inter_fops = gluster::fop::read_inter_fop(parts[1], &filename).unwrap();
 
-    Ok(())
+    Ok((aggr_fops, inter_fops))
 }
 
 fn timer(d: Duration) -> Receiver<()> {
     let (tx, rx) = channel();
-    thread::spawn(move || {
-        loop {
-            thread::sleep(d);
-            if tx.send(()).is_err() {
-                break;
-            }
+    thread::spawn(move || loop {
+        thread::sleep(d);
+        if tx.send(()).is_err() {
+            break;
         }
     });
     rx
 }
+
 mod influx {
     extern crate influent;
 
@@ -99,26 +128,21 @@ mod influx {
     pub fn record_measurement(brick_fops: &HashMap<String, f64>,
                               client: &Client,
                               hostname: &str,
-                              brick_name: &str,
-                              volume_name: &str) {
+                              file_name: &str) {
         let mut measurement = Measurement::new("gluster_brick");
+        measurement.add_tag("storage_type", "gluster");
+        measurement.add_tag("volume_name", "");
         measurement.add_tag("type", "brick");
         measurement.set_timestamp(time::now().to_timespec().sec as i64);
         measurement.add_tag("hostname", hostname);
-        measurement.add_tag("brick_name", brick_name);
-        measurement.add_tag("volume_name", volume_name);
 
-        measurement.add_field("load_average", Value::Integer(osd_m.load_average as i64));
+        // Get this from the filename
+        //measurement.add_tag("brick_name", brick_name);
+        //measurement.add_tag("volume_name", volume_name);
 
-        // Send Influxdb the diff between last and now.
-        measurement.add_field("subop", Value::Integer(osd_m.subop as i64));
-        measurement.add_field("subop_in_bytes",
-                              Value::Integer(osd_m.subop_in_bytes as i64));
-
-        measurement.add_field("op_r", Value::Integer(osd_m.op_r as i64));
-        measurement.add_field("op_r_bytes", Value::Integer(osd_m.op_r_bytes as i64));
-        measurement.add_field("op_w", Value::Integer(osd_m.op_w as i64));
-        measurement.add_field("op_w_bytes", Value::Integer(osd_m.op_w_bytes as i64));
+        for (name, value) in brick_fops {
+            measurement.add_field(name, Value::Integer(*value as i64));
+        }
 
         let _ = client.write_one(measurement, Some(Precision::Seconds));
     }

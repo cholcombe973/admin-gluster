@@ -1,0 +1,14 @@
+name: admin-gluster
+version: '0.1'
+summary: Gluster metrics
+description: |
+  admin-gluster exports health and performance metrics from gluster to influxdb
+grade: stable
+confinement: devmode
+parts:
+  admin-gluster:
+    plugin: rust
+    source: .
+apps:
+  admin-gluster:
+    command: admin-gluster
