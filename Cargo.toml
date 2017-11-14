@@ -10,9 +10,9 @@ influent = "0.4"
 libatasmart = "*"
 log = "*"
 simple_logger = "*"
-serde = "0.9"
-serde_derive = "0.9"
-serde_yaml = "0.6"
+serde = "~1.0"
+serde_derive = "~1.0"
+serde_yaml = "~0.7"
 time = "*"
 
 [profile.release]

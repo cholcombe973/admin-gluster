@@ -1,7 +1,9 @@
 extern crate gluster;
 extern crate influent;
 extern crate time;
+
 use self::gluster::volume_list;
+use super::Args;
 
 use std::collections::HashMap;
 use std::fs;
@@ -9,6 +11,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::Path;
 use std::process::Command;
+use std::str::FromStr;
 use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::Duration;
@@ -16,11 +19,11 @@ use std::time::Duration;
 use self::influent::client::{Client, Credentials};
 use self::influent::create_client;
 
-pub fn initialize_brick_scanner(args: &Args) {
+pub fn initialize_brick_scanner(args: &Args, scan_interval: u64) {
     thread::spawn(move || {
         debug!("Monitoring Gluster Bricks");
-        // Wait for 5 seconds and then proceed.
-        let _ = timer(Duration::from_secs(5));
+        // Wait for x seconds and then proceed.
+        let _ = timer(Duration::new(scan_interval, 0));
 
         let vols = match gluster::volume_list() {
             Some(vols) => vols,
@@ -41,38 +44,27 @@ pub fn initialize_brick_scanner(args: &Args) {
 
         let hostname = {
             let mut buffer: String = String::new();
-            let bytes_read = File::open("/etc/hostname")
-                .unwrap()
-                .read_to_string(&mut buffer)
-                .unwrap();
-            buffer
+            match File::open("/etc/hostname").and_then(|f| f.read_to_string(&mut buffer)) {
+                Ok(_) => buffer,
+                Err(e) => {
+                    error!("Eror reading /etc/hostname: {}", e);
+                    return;
+                }
+            }
         };
-        let do_influx = args.influx.is_some() && args.outputs.contains(&"influx".to_string());
-        let mut user = String::new();
-        let mut password = String::new();
         let credentials: Credentials;
-        let host: String;
-        let mut hosts: Vec<&str> = vec![];
-
-        let influx = args.influx;
-        let client = if do_influx {
-            let influx = influx.unwrap();
-            user = influx.user.clone();
-            password = influx.password.clone();
+        let influx_client = {
             credentials = Credentials {
-                username: &user[..],
-                password: &password[..],
+                username: &args.influx_username.unwrap_or("".to_string())[..],
+                password: &args.influx_password.unwrap_or("".to_string())[..],
                 database: "ceph",
             };
-            host = format!("http://{}:{}", influx.host, influx.port);
-            hosts = vec![&host[..]];
-            create_client(credentials, hosts)
-        } else {
-            credentials = Credentials {
-                username: &user[..],
-                password: &password[..],
-                database: "",
-            };
+            let host = format!(
+                "http://{}:{}",
+                args.influx_host.unwrap_or("localhost".to_string()),
+                args.influx_port.unwrap_or(8086)
+            );
+            let hosts = vec![&host[..]];
             create_client(credentials, hosts)
         };
         stats_files
@@ -84,20 +76,21 @@ pub fn initialize_brick_scanner(args: &Args) {
             // Record the stats in influx
             .map(|entry| {
                 let fops = split_and_parse_fops_json(&entry.path()).unwrap();
-                influx::record_measurement(&fops.0, influx_client, &hostname, "brick_name");
-                influx::record_measurement(&fops.1, influx_client, &hostname, "brick_name");
+                influx::record_measurement(&fops.0, &influx_client, &hostname, "brick_name",
+                "vol_name");
+                influx::record_measurement(&fops.1, &influx_client, &hostname, "brick_name",
+                "vol_name");
             });
     });
 }
 
 // Return a tuple of (aggr fops, inter fops)
-fn split_and_parse_fops_json
-    (path: &Path)
-     -> Result<(HashMap<String, f64>, HashMap<String, f64>), ::std::io::Error> {
+fn split_and_parse_fops_json(
+    path: &Path,
+) -> Result<(HashMap<String, f64>, HashMap<String, f64>), ::std::io::Error> {
     let filename = path.file_name().unwrap().to_string_lossy();
     let mut buffer: String = String::new();
-    let bytes_read = File::open(path)?
-        .read_to_string(&mut buffer)?;
+    let bytes_read = File::open(path)?.read_to_string(&mut buffer)?;
     let parts: Vec<&str> = buffer.split("}\n{").collect();
     let aggr_fops = gluster::fop::read_aggr_fop(parts[0], &filename).unwrap();
     let inter_fops = gluster::fop::read_inter_fop(parts[1], &filename).unwrap();
@@ -125,10 +118,13 @@ mod influx {
     use self::influent::measurement::{Measurement, Value};
     use self::influent::client::{Precision, Client};
 
-    pub fn record_measurement(brick_fops: &HashMap<String, f64>,
-                              client: &Client,
-                              hostname: &str,
-                              file_name: &str) {
+    pub fn record_measurement(
+        brick_fops: &HashMap<String, f64>,
+        client: &Client,
+        hostname: &str,
+        file_name: &str,
+        volume_name: &str,
+    ) {
         let mut measurement = Measurement::new("gluster_brick");
         measurement.add_tag("storage_type", "gluster");
         measurement.add_tag("volume_name", "");
@@ -140,6 +136,7 @@ mod influx {
         //measurement.add_tag("brick_name", brick_name);
         //measurement.add_tag("volume_name", volume_name);
 
+        // Add all fields collected from gluster
         for (name, value) in brick_fops {
             measurement.add_field(name, Value::Integer(*value as i64));
         }
