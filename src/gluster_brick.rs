@@ -43,21 +43,10 @@ pub fn initialize_brick_scanner(args: Args, scan_interval: u64) {
         };
         let username = args.influx_username.unwrap_or("".to_string());
         let password = args.influx_password.unwrap_or("".to_string());
-        let host = format!(
-            "http://{}:{}",
-            args.influx_host.unwrap_or("localhost".to_string()),
-            args.influx_port.unwrap_or(8086)
+        let influx_host = args.influx_url.unwrap_or(
+            "http://localhost:8086".to_string(),
         );
-        let credentials: Credentials;
-        let influx_client = {
-            credentials = Credentials {
-                username: &username,
-                password: &password,
-                database: "glusterfs",
-            };
-            let hosts = vec![&host[..]];
-            create_client(credentials, hosts)
-        };
+        let db = args.influx_database.unwrap_or("glusterfs".to_string());
 
         for stat_file in stats_files {
             //Only operate on valid directory entries
@@ -74,8 +63,24 @@ pub fn initialize_brick_scanner(args: Args, scan_interval: u64) {
                 .replace("glusterfsd_", "");
             // If the entry matches a volume name
             let fops = split_and_parse_fops_json(&e.path()).unwrap();
-            influx::record_measurement(&fops.0, &influx_client, &hostname, &filename);
-            influx::record_measurement(&fops.1, &influx_client, &hostname, &filename);
+            influx::record_measurement(
+                &fops.0,
+                &username,
+                &password,
+                &influx_host,
+                &db,
+                &hostname,
+                &filename,
+            );
+            influx::record_measurement(
+                &fops.1,
+                &username,
+                &password,
+                &influx_host,
+                &db,
+                &hostname,
+                &filename,
+            );
 
         }
     });
@@ -112,16 +117,22 @@ fn timer(d: Duration) -> Receiver<()> {
 
 mod influx {
     extern crate influent;
+    extern crate reqwest;
 
     use std::collections::HashMap;
     use super::time;
 
+    use self::influent::client::Precision;
+    use self::influent::serializer::Serializer;
+    use self::influent::serializer::line::LineSerializer;
     use self::influent::measurement::{Measurement, Value};
-    use self::influent::client::{Precision, Client};
 
     pub fn record_measurement(
         brick_fops: &HashMap<String, f64>,
-        client: &Client,
+        username: &str,
+        password: &str,
+        influx_url: &str,
+        database: &str,
         hostname: &str,
         brick_name: &str,
     ) {
@@ -139,7 +150,21 @@ mod influx {
         for (name, value) in brick_fops {
             measurement.add_field(name, Value::Integer(*value as i64));
         }
+        let serializer = LineSerializer::new();
+        let serial_data = serializer.serialize(&measurement);
 
-        let _ = client.write_one(measurement, Some(Precision::Seconds));
+        let client = reqwest::Client::new();
+        let res = client
+            .post(&format!(
+                "{influx_url}/write?db={database}&precision={precision}",
+                influx_url = influx_url,
+                database = database,
+                precision = Precision::Seconds.to_string()
+            ))
+            .body(serial_data)
+            .send();
+        info!("write result: {:?}", res);
+
+        //let _ = client.write_one(measurement, Some(Precision::Seconds));
     }
 }

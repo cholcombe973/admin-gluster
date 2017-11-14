@@ -17,8 +17,8 @@ use log::LogLevel;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
 pub struct Args {
-    pub influx_host: Option<String>,
-    pub influx_port: Option<u16>,
+    pub influx_url: Option<String>,
+    pub influx_database: Option<String>,
     pub influx_username: Option<String>,
     pub influx_password: Option<String>,
 }
