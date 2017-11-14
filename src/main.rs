@@ -16,11 +16,11 @@ use clap::{Arg, App};
 use log::LogLevel;
 
 #[derive(Debug, PartialEq, Serialize, Deserialize)]
-struct Args {
-    influx_host: Option<String>,
-    influx_port: Option<u16>,
-    influx_username: Option<String>,
-    influx_password: Option<String>,
+pub struct Args {
+    pub influx_host: Option<String>,
+    pub influx_port: Option<u16>,
+    pub influx_username: Option<String>,
+    pub influx_password: Option<String>,
 }
 
 fn main() {
@@ -92,7 +92,7 @@ fn main() {
         }
     };
 
-    gluster_brick::initialize_brick_scanner(&config, interval);
+    gluster_brick::initialize_brick_scanner(config, interval);
     loop {
         std::thread::sleep(std::time::Duration::new(10, 0));
     }
