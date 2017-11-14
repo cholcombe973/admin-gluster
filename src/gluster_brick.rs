@@ -98,6 +98,7 @@ fn split_and_parse_fops_json(
     let mut buffer: String = String::new();
     File::open(path)?.read_to_string(&mut buffer)?;
     let parts: Vec<&str> = buffer.split("}\n{").collect();
+    debug!("json parts: {:?}", parts);
     let aggr_fops = gluster::fop::read_aggr_fop(parts[0], &filename).unwrap();
     let inter_fops = gluster::fop::read_inter_fop(parts[1], &filename).unwrap();
 
